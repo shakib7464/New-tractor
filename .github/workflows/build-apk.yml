@@ -22,11 +22,10 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
       - name: Install Android platform packages
-        run: sdkmanager "platforms;android-36" "platforms;android-36.1"
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platforms;android-36" "platforms;android-36.1"
 
       - name: Find or extract Android project
         id: project
