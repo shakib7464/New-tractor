@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 jobs:
-  build-debug-apk:
+  build-preview-apk:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -61,13 +61,13 @@ jobs:
         with:
           gradle-version: '9.3.1'
 
-      - name: Build Debug APK
-        run: gradle -p "${{ steps.project.outputs.project_dir }}" :app:assembleDebug --no-daemon
+      - name: Build Preview APK (fast, release-like)
+        run: gradle -p "${{ steps.project.outputs.project_dir }}" :app:assemblePreview --no-daemon
 
       - name: Print APK signing SHA-1 (Google login setup)
         shell: bash
         run: |
-          APK="${{ steps.project.outputs.project_dir }}/app/build/outputs/apk/debug/app-debug.apk"
+          APK="${{ steps.project.outputs.project_dir }}/app/build/outputs/apk/preview/app-preview.apk"
           {
             echo "### APK signing certificate (Google Cloud OAuth-এ এই SHA-1 দিন)"
             echo '```'
@@ -75,9 +75,9 @@ jobs:
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload Debug APK
+      - name: Upload Preview APK
         uses: actions/upload-artifact@v4
         with:
-          name: Araaf-Tractor-Khata-debug-apk
-          path: ${{ steps.project.outputs.project_dir }}/app/build/outputs/apk/debug/app-debug.apk
+          name: Araaf-Tractor-Khata-preview-apk
+          path: ${{ steps.project.outputs.project_dir }}/app/build/outputs/apk/preview/app-preview.apk
           if-no-files-found: error
