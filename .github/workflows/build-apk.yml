@@ -25,6 +25,9 @@ jobs:
   build-preview-apk:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    # GitHub Release বানাতে লেখার অনুমতি লাগে
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout repository
@@ -105,6 +108,10 @@ jobs:
         with:
           gradle-version: '9.3.1'
 
+      # প্রতি বিল্ডে versionCode বাড়ে (100 + run number), যাতে আগের অ্যাপের উপরে আপডেট ইনস্টল হয়
+      - name: Compute version code
+        run: echo "VERSION_CODE=$((100 + GITHUB_RUN_NUMBER))" >> "$GITHUB_ENV"
+
       - name: Build preview APK
         run: gradle -p "${{ steps.project.outputs.project_dir }}" :app:assemblePreview --stacktrace
 
@@ -126,6 +133,7 @@ jobs:
           OUT="$RUNNER_TEMP/dist/Araaf-Tractor-Khata-v${VERSION_NAME}-build${GITHUB_RUN_NUMBER}.apk"
           cp "$SRC" "$OUT"
           echo "apk_path=$OUT" >> "$GITHUB_OUTPUT"
+          echo "version_name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
 
           # apksigner দিয়ে সাইন যাচাই + SHA-1 (minSdk 24 হওয়ায় শুধু v2+ সাইন থাকে; keytool -jarfile এখানে কিছু দেখায় না)
           SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
@@ -157,6 +165,23 @@ jobs:
           path: ${{ steps.apk.outputs.apk_path }}
           if-no-files-found: error
           retention-days: 30
+
+      # অ্যাপের ভেতরের "আপডেট" বাটন এই রিলিজ থেকেই নতুন APK নামায় (শুধু মূল branch-এর push-এ)
+      - name: Publish GitHub Release (in-app update)
+        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          TAG="build-${VERSION_CODE}"
+          gh release create "$TAG" "${{ steps.apk.outputs.apk_path }}" \
+            --target "$GITHUB_SHA" \
+            --title "Araaf Tractor Khata v${{ steps.apk.outputs.version_name }} (build ${VERSION_CODE})" \
+            --notes "অটো বিল্ড #${GITHUB_RUN_NUMBER} • commit ${GITHUB_SHA::7}" \
+            --latest
+          echo "### 📦 Release \`$TAG\` প্রকাশিত হয়েছে — অ্যাপের ভেতর থেকে আপডেট করা যাবে।" >> "$GITHUB_STEP_SUMMARY"
 
       # R8 চালু থাকায় ক্র্যাশ লগের নাম এলোমেলো দেখায়; এই ফাইল দিয়ে আসল লাইন বের করা যায়
       - name: Upload R8 mapping (crash log decode)
