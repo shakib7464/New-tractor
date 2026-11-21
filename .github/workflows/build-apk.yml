@@ -36,12 +36,15 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      # compileSdk = 36 (minorApiLevel 1) হওয়ায় android-36.1 লাগে
-      - name: Install Android platform packages
-        run: sdkmanager "platforms;android-36" "platforms;android-36.1"
+      # ubuntu-latest-এ Android SDK আগে থেকেই ইনস্টল করা (ANDROID_HOME সেট), তাই আলাদা setup action লাগে না।
+      # compileSdk = 36 (minorApiLevel 1) হওয়ায় android-36.1 লাগে।
+      - name: Prepare Android SDK
+        shell: bash
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platforms;android-36" "platforms;android-36.1" \
+            || echo "::warning::sdkmanager প্যাকেজ ইনস্টল করতে পারেনি; Gradle নিজে ডাউনলোড করার চেষ্টা করবে।"
 
       - name: Find or extract Android project
         id: project
