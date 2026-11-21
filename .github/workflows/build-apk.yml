@@ -2,9 +2,21 @@ name: Build Araaf Tractor Khata APK
 
 on:
   push:
-    paths:
-      - '**'
+    paths-ignore:
+      - '**.md'
+      - '**.txt'
+  pull_request:
   workflow_dispatch:
+    inputs:
+      run_tests:
+        description: 'APK বানানোর পর unit test চালাবেন? (ফেল করলেও APK পাওয়া যাবে)'
+        type: boolean
+        default: true
+
+# একই branch-এ নতুন push এলে আগের চলমান build বাতিল হবে
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -12,6 +24,8 @@ permissions:
 jobs:
   build-preview-apk:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -22,13 +36,12 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      # compileSdk = 36 (minorApiLevel 1) হওয়ায় android-36.1 লাগে
       - name: Install Android platform packages
-        shell: bash
-        run: |
-          SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -path '*/bin/sdkmanager' | sort -V | tail -n 1)"
-          echo "Using sdkmanager: $SDKMANAGER"
-          yes | "$SDKMANAGER" --licenses > /dev/null || true
-          "$SDKMANAGER" "platforms;android-36" "platforms;android-36.1"
+        run: sdkmanager "platforms;android-36" "platforms;android-36.1"
 
       - name: Find or extract Android project
         id: project
@@ -37,47 +50,142 @@ jobs:
           set -euo pipefail
           PROJECT_DIR=""
           if [[ -f settings.gradle.kts && -f app/build.gradle.kts ]]; then
+            # ১) প্রজেক্ট repository-র root-এই আছে
             PROJECT_DIR="$GITHUB_WORKSPACE"
           else
-            ZIP_FILE="$(find "$GITHUB_WORKSPACE" -maxdepth 1 -type f -iname '*.zip' -print -quit)"
-            if [[ -z "$ZIP_FILE" ]]; then
-              echo "No Android project or source ZIP found in repository root." >&2
-              exit 1
+            # ২) প্রজেক্ট repository-র কোনো সাবফোল্ডারে আছে (যেমন native_work/)
+            FOUND="$(find "$GITHUB_WORKSPACE" -maxdepth 4 -type f -path '*/app/build.gradle.kts' \
+              -not -path '*/.git/*' -not -path '*/build/*' -print -quit)"
+            if [[ -n "$FOUND" ]]; then
+              PROJECT_DIR="$(dirname "$(dirname "$FOUND")")"
+            else
+              # ৩) repository-তে শুধু source ZIP আছে
+              ZIP_FILE="$(find "$GITHUB_WORKSPACE" -maxdepth 1 -type f -iname '*.zip' -print -quit)"
+              if [[ -z "$ZIP_FILE" ]]; then
+                echo "::error::Android project বা source ZIP repository-তে পাওয়া যায়নি।"
+                exit 1
+              fi
+              mkdir -p "$RUNNER_TEMP/aaraaf-source"
+              unzip -q "$ZIP_FILE" -d "$RUNNER_TEMP/aaraaf-source"
+              FOUND="$(find "$RUNNER_TEMP/aaraaf-source" -type f -path '*/app/build.gradle.kts' -print -quit)"
+              if [[ -z "$FOUND" ]]; then
+                echo "::error::ZIP-এর ভেতরে app/build.gradle.kts নেই।"
+                exit 1
+              fi
+              PROJECT_DIR="$(dirname "$(dirname "$FOUND")")"
             fi
-            mkdir -p "$RUNNER_TEMP/aaraaf-source"
-            unzip -q "$ZIP_FILE" -d "$RUNNER_TEMP/aaraaf-source"
-            PROJECT_FILE="$(find "$RUNNER_TEMP/aaraaf-source" -type f -path '*/app/build.gradle.kts' -print -quit)"
-            if [[ -z "$PROJECT_FILE" ]]; then
-              echo "ZIP does not contain app/build.gradle.kts." >&2
-              exit 1
-            fi
-            PROJECT_DIR="$(dirname "$(dirname "$PROJECT_FILE")")"
+          fi
+          if [[ ! -f "$PROJECT_DIR/settings.gradle.kts" ]]; then
+            echo "::error::$PROJECT_DIR-এ settings.gradle.kts নেই।"
+            exit 1
           fi
           echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
           echo "Android project: $PROJECT_DIR"
+
+      - name: Sanity checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          DIR="${{ steps.project.outputs.project_dir }}"
+          # preview build একই debug key দিয়ে সাইন হয়, কী না থাকলে বিল্ড ফেল করবে
+          if [[ ! -f "$DIR/araaf-debug.keystore" && ! -f "$DIR/debug.keystore" ]]; then
+            echo "::error::araaf-debug.keystore পাওয়া যায়নি। এটি repository-তে commit করুন (সাইন একই রাখতে)।"
+            exit 1
+          fi
+          # প্রোফাইল বদলের রিস্টার্ট এই Activity-র উপর নির্ভর করে (v22 ফিক্স)
+          if ! grep -q "RestartActivity" "$DIR/app/src/main/AndroidManifest.xml"; then
+            echo "::warning::AndroidManifest.xml-এ RestartActivity নেই; প্রোফাইল বদলালে অ্যাপ বন্ধ হয়ে যেতে পারে।"
+          fi
 
       - name: Set up Gradle 9.3.1
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.3.1'
 
-      - name: Build Preview APK (fast, release-like)
-        run: gradle -p "${{ steps.project.outputs.project_dir }}" :app:assemblePreview --no-daemon
+      - name: Build preview APK
+        run: gradle -p "${{ steps.project.outputs.project_dir }}" :app:assemblePreview --stacktrace
 
-      - name: Print APK signing SHA-1 (Google login setup)
+      - name: Collect and verify APK
+        id: apk
         shell: bash
         run: |
-          APK="${{ steps.project.outputs.project_dir }}/app/build/outputs/apk/preview/app-preview.apk"
+          set -euo pipefail
+          DIR="${{ steps.project.outputs.project_dir }}"
+          SRC="$(find "$DIR/app/build/outputs/apk/preview" -maxdepth 1 -type f -name '*.apk' -print -quit)"
+          if [[ -z "$SRC" ]]; then
+            echo "::error::preview APK তৈরি হয়নি।"
+            exit 1
+          fi
+
+          VERSION_NAME="$(sed -nE 's/.*versionName *= *"([^"]+)".*/\1/p' "$DIR/app/build.gradle.kts" | head -n1)"
+          VERSION_NAME="${VERSION_NAME:-unknown}"
+          mkdir -p "$RUNNER_TEMP/dist"
+          OUT="$RUNNER_TEMP/dist/Araaf-Tractor-Khata-v${VERSION_NAME}-build${GITHUB_RUN_NUMBER}.apk"
+          cp "$SRC" "$OUT"
+          echo "apk_path=$OUT" >> "$GITHUB_OUTPUT"
+
+          # apksigner দিয়ে সাইন যাচাই + SHA-1 (minSdk 24 হওয়ায় শুধু v2+ সাইন থাকে; keytool -jarfile এখানে কিছু দেখায় না)
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          BT="$(ls -d "$SDK_ROOT"/build-tools/* | sort -V | tail -n1)"
+          "$BT/apksigner" verify --verbose --print-certs "$OUT" > "$RUNNER_TEMP/apksigner.txt" 2>&1 || {
+            cat "$RUNNER_TEMP/apksigner.txt"
+            echo "::error::APK-র সাইন যাচাই ফেল করেছে।"
+            exit 1
+          }
+
+          SIZE="$(du -h "$OUT" | cut -f1)"
+          APK_SHA="$(sha256sum "$OUT" | cut -d' ' -f1)"
           {
-            echo "### APK signing certificate (Google Cloud OAuth-এ এই SHA-1 দিন)"
+            echo "### ✅ Araaf Tractor Khata v${VERSION_NAME} (build ${GITHUB_RUN_NUMBER})"
+            echo ""
+            echo "- ফাইল: \`$(basename "$OUT")\` ($SIZE)"
+            echo "- APK SHA-256: \`$APK_SHA\`"
+            echo ""
+            echo "#### সাইন সার্টিফিকেট (Google Cloud OAuth-এ এই SHA-1 দিন)"
             echo '```'
-            keytool -printcert -jarfile "$APK" | grep -E "SHA1|SHA256" || true
+            grep -E "Verified using|certificate SHA-(1|256) digest" "$RUNNER_TEMP/apksigner.txt" || true
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload Preview APK
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: Araaf-Tractor-Khata-preview-apk
-          path: ${{ steps.project.outputs.project_dir }}/app/build/outputs/apk/preview/app-preview.apk
+          path: ${{ steps.apk.outputs.apk_path }}
           if-no-files-found: error
+          retention-days: 30
+
+      # R8 চালু থাকায় ক্র্যাশ লগের নাম এলোমেলো দেখায়; এই ফাইল দিয়ে আসল লাইন বের করা যায়
+      - name: Upload R8 mapping (crash log decode)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Araaf-Tractor-Khata-r8-mapping
+          path: ${{ steps.project.outputs.project_dir }}/app/build/outputs/mapping/preview/mapping.txt
+          if-no-files-found: warn
+          retention-days: 30
+
+      # APK আগেই আপলোড হয়ে গেছে, তাই test ফেল করলেও APK পাওয়া যাবে
+      - name: Run unit tests
+        if: github.event_name != 'workflow_dispatch' || inputs.run_tests
+        continue-on-error: true
+        run: gradle -p "${{ steps.project.outputs.project_dir }}" :app:testDebugUnitTest --stacktrace
+
+      - name: Upload test reports
+        if: always() && (github.event_name != 'workflow_dispatch' || inputs.run_tests)
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-reports
+          path: |
+            ${{ steps.project.outputs.project_dir }}/app/build/reports/tests
+            ${{ steps.project.outputs.project_dir }}/app/build/test-results
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload build reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-failure-reports
+          path: ${{ steps.project.outputs.project_dir }}/app/build/reports
+          if-no-files-found: ignore
+          retention-days: 7
