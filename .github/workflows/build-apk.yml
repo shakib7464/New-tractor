@@ -1,4 +1,4 @@
-name: Build APK
+name: Build APK from ZIP
 
 on:
   push:
@@ -25,11 +25,24 @@ jobs:
           yes | sdkmanager --licenses > /dev/null || true
           sdkmanager "platforms;android-36" "platforms;android-36.1" || true
 
-      - name: Find project
+      - name: Find project (root, subfolder or newest ZIP)
         id: project
         run: |
-          if [[ -f app/build.gradle.kts ]]; then DIR="$GITHUB_WORKSPACE"
-          else DIR="$(dirname "$(dirname "$(find "$GITHUB_WORKSPACE" -maxdepth 4 -path '*/app/build.gradle.kts' -not -path '*/.git/*' -print -quit)")")"
+          set -e
+          if [[ -f app/build.gradle.kts ]]; then
+            DIR="$GITHUB_WORKSPACE"
+          else
+            FOUND="$(find "$GITHUB_WORKSPACE" -maxdepth 4 -path '*/app/build.gradle.kts' -not -path '*/.git/*' -print -quit)"
+            if [[ -z "$FOUND" ]]; then
+              ZIP="$(find "$GITHUB_WORKSPACE" -maxdepth 1 -iname '*.zip' | sort -V | tail -n1)"
+              [[ -n "$ZIP" ]] || { echo "::error::No project or ZIP found"; exit 1; }
+              echo "Using ZIP: $(basename "$ZIP")"
+              mkdir -p "$RUNNER_TEMP/src"
+              unzip -q "$ZIP" -d "$RUNNER_TEMP/src"
+              FOUND="$(find "$RUNNER_TEMP/src" -path '*/app/build.gradle.kts' -print -quit)"
+              [[ -n "$FOUND" ]] || { echo "::error::app/build.gradle.kts not in ZIP"; exit 1; }
+            fi
+            DIR="$(dirname "$(dirname "$FOUND")")"
           fi
           echo "dir=$DIR" >> "$GITHUB_OUTPUT"
 
