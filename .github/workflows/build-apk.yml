@@ -196,7 +196,8 @@ jobs:
           retention-days: 14
 
       # অ্যাপের ভেতরের "আপডেট" বাটন এই রিলিজ থেকেই নতুন APK নামায় (শুধু মূল branch-এর push-এ)
-      # unit test ফেল করলে রিলিজ "pre-release" হয়: APK ডাউনলোড করা যায়, কিন্তু অ্যাপের ভেতরের আপডেট একে দেখে না।
+      # APK সফলভাবে বিল্ড ও সাইন যাচাই হলে রিলিজ সবসময় "latest" হয়। unit test ফেল করলেও আপডেট আটকায় না
+      # (আগে ফেল করলে রিলিজ pre-release হতো এবং অ্যাপ নতুন ভার্সন দেখতেই পেত না); শুধু নোটে সতর্কতা থাকে।
       - name: Publish GitHub Release (in-app update)
         if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
         shell: bash
@@ -224,11 +225,9 @@ jobs:
 
           if [[ "$TEST_OUTCOME" == "failure" ]]; then
             echo "" >> "$NOTES_FILE"
-            echo "⚠️ unit test ফেল করেছে; তাই এটি pre-release, অ্যাপে আপডেট হিসেবে দেখাবে না।" >> "$NOTES_FILE"
-            LATEST_FLAG="--prerelease"
-          else
-            LATEST_FLAG="--latest"
+            echo "⚠️ unit test ফেল করেছে (APK ঠিকভাবে বিল্ড ও সাইন হয়েছে)।" >> "$NOTES_FILE"
           fi
+          LATEST_FLAG="--latest"
 
           gh release create "$TAG" "${{ steps.apk.outputs.apk_path }}" \
             --target "$GITHUB_SHA" \
@@ -236,10 +235,9 @@ jobs:
             --notes-file "$NOTES_FILE" \
             "$LATEST_FLAG"
 
+          echo "### 📦 Release \`$TAG\` প্রকাশিত হয়েছে — অ্যাপের ভেতর থেকে আপডেট করা যাবে।" >> "$GITHUB_STEP_SUMMARY"
           if [[ "$TEST_OUTCOME" == "failure" ]]; then
-            echo "### ⚠️ Release \`$TAG\` pre-release হিসেবে প্রকাশিত (unit test ফেল) — অ্যাপের আপডেটে আসবে না।" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "### 📦 Release \`$TAG\` প্রকাশিত হয়েছে — অ্যাপের ভেতর থেকে আপডেট করা যাবে।" >> "$GITHUB_STEP_SUMMARY"
+            echo "### ⚠️ unit test ফেল করেছে; তবুও আপডেট চালু আছে। Test report দেখে ঠিক করুন।" >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Upload build reports on failure
