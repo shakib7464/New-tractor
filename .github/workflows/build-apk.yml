@@ -196,8 +196,8 @@ jobs:
           retention-days: 14
 
       # অ্যাপের ভেতরের "আপডেট" বাটন এই রিলিজ থেকেই নতুন APK নামায় (শুধু মূল branch-এর push-এ)
-      # APK সফলভাবে বিল্ড ও সাইন যাচাই হলে রিলিজ সবসময় "latest" হয়। unit test ফেল করলেও আপডেট আটকায় না
-      # (আগে ফেল করলে রিলিজ pre-release হতো এবং অ্যাপ নতুন ভার্সন দেখতেই পেত না); শুধু নোটে সতর্কতা থাকে।
+      # APK সফলভাবে বিল্ড ও সাইন যাচাই হলে রিলিজ সবসময় "latest" হয়। unit test ফেল করলেও আপডেট আটকায় না।
+      # রিলিজের নোট ইচ্ছা করেই খালি রাখা হয়েছে, তাই অ্যাপের আপডেট পপআপে কোনো commit/test লেখা আসবে না।
       - name: Publish GitHub Release (in-app update)
         if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
         shell: bash
@@ -212,28 +212,11 @@ jobs:
           # একই run আবার চালালে (re-run) আগের একই tag-এর রিলিজ মুছে নতুন করে বানানো হয়
           gh release delete "$TAG" --cleanup-tag --yes >/dev/null 2>&1 || true
 
-          # অ্যাপের আপডেট ডায়ালগে যা দেখাবে: কোন commit, আর commit message
-          MSG="$(git log -1 --pretty=%B "$GITHUB_SHA" | sed '/^[[:space:]]*$/d' | head -n 6 | cut -c1-200 || true)"
-          NOTES_FILE="$RUNNER_TEMP/release-notes.txt"
-          {
-            echo "অটো বিল্ড #${GITHUB_RUN_NUMBER} • commit ${GITHUB_SHA::7}"
-            if [[ -n "$MSG" ]]; then
-              echo ""
-              echo "$MSG"
-            fi
-          } > "$NOTES_FILE"
-
-          if [[ "$TEST_OUTCOME" == "failure" ]]; then
-            echo "" >> "$NOTES_FILE"
-            echo "⚠️ unit test ফেল করেছে (APK ঠিকভাবে বিল্ড ও সাইন হয়েছে)।" >> "$NOTES_FILE"
-          fi
-          LATEST_FLAG="--latest"
-
           gh release create "$TAG" "${{ steps.apk.outputs.apk_path }}" \
             --target "$GITHUB_SHA" \
             --title "Araaf Tractor Khata v${{ steps.apk.outputs.version_name }} (build ${VERSION_CODE})" \
-            --notes-file "$NOTES_FILE" \
-            "$LATEST_FLAG"
+            --notes "" \
+            --latest
 
           echo "### 📦 Release \`$TAG\` প্রকাশিত হয়েছে — অ্যাপের ভেতর থেকে আপডেট করা যাবে।" >> "$GITHUB_STEP_SUMMARY"
           if [[ "$TEST_OUTCOME" == "failure" ]]; then
