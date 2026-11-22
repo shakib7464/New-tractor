@@ -66,7 +66,9 @@ jobs:
               PROJECT_DIR="$(dirname "$(dirname "$FOUND")")"
             else
               # ৩) repository-তে শুধু source ZIP আছে
-              ZIP_FILE="$(find "$GITHUB_WORKSPACE" -maxdepth 1 -type f -iname '*.zip' -print -quit)"
+              # একাধিক ZIP থাকলে সংখ্যা ধরে সবচেয়ে নতুনটা (যেমন v25 > v23) নেওয়া হয়
+              ZIP_FILE="$(find "$GITHUB_WORKSPACE" -maxdepth 1 -type f -iname '*.zip' | sort -V | tail -n1)"
+              echo "Source ZIP: ${ZIP_FILE:-নেই}"
               if [[ -z "$ZIP_FILE" ]]; then
                 echo "::error::Android project বা source ZIP repository-তে পাওয়া যায়নি।"
                 exit 1
@@ -166,23 +168,6 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      # অ্যাপের ভেতরের "আপডেট" বাটন এই রিলিজ থেকেই নতুন APK নামায় (শুধু মূল branch-এর push-এ)
-      - name: Publish GitHub Release (in-app update)
-        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          TAG="build-${VERSION_CODE}"
-          gh release create "$TAG" "${{ steps.apk.outputs.apk_path }}" \
-            --target "$GITHUB_SHA" \
-            --title "Araaf Tractor Khata v${{ steps.apk.outputs.version_name }} (build ${VERSION_CODE})" \
-            --notes "অটো বিল্ড #${GITHUB_RUN_NUMBER} • commit ${GITHUB_SHA::7}" \
-            --latest
-          echo "### 📦 Release \`$TAG\` প্রকাশিত হয়েছে — অ্যাপের ভেতর থেকে আপডেট করা যাবে।" >> "$GITHUB_STEP_SUMMARY"
-
       # R8 চালু থাকায় ক্র্যাশ লগের নাম এলোমেলো দেখায়; এই ফাইল দিয়ে আসল লাইন বের করা যায়
       - name: Upload R8 mapping (crash log decode)
         uses: actions/upload-artifact@v4
@@ -194,6 +179,7 @@ jobs:
 
       # APK আগেই আপলোড হয়ে গেছে, তাই test ফেল করলেও APK পাওয়া যাবে
       - name: Run unit tests
+        id: tests
         if: github.event_name != 'workflow_dispatch' || inputs.run_tests
         continue-on-error: true
         run: gradle -p "${{ steps.project.outputs.project_dir }}" :app:testDebugUnitTest --stacktrace
@@ -208,6 +194,53 @@ jobs:
             ${{ steps.project.outputs.project_dir }}/app/build/test-results
           if-no-files-found: ignore
           retention-days: 14
+
+      # অ্যাপের ভেতরের "আপডেট" বাটন এই রিলিজ থেকেই নতুন APK নামায় (শুধু মূল branch-এর push-এ)
+      # unit test ফেল করলে রিলিজ "pre-release" হয়: APK ডাউনলোড করা যায়, কিন্তু অ্যাপের ভেতরের আপডেট একে দেখে না।
+      - name: Publish GitHub Release (in-app update)
+        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TEST_OUTCOME: ${{ steps.tests.outcome }}
+        run: |
+          set -euo pipefail
+          TAG="build-${VERSION_CODE}"
+
+          # একই run আবার চালালে (re-run) আগের একই tag-এর রিলিজ মুছে নতুন করে বানানো হয়
+          gh release delete "$TAG" --cleanup-tag --yes >/dev/null 2>&1 || true
+
+          # অ্যাপের আপডেট ডায়ালগে যা দেখাবে: কোন commit, আর commit message
+          MSG="$(git log -1 --pretty=%B "$GITHUB_SHA" | sed '/^[[:space:]]*$/d' | head -n 6 | cut -c1-200 || true)"
+          NOTES_FILE="$RUNNER_TEMP/release-notes.txt"
+          {
+            echo "অটো বিল্ড #${GITHUB_RUN_NUMBER} • commit ${GITHUB_SHA::7}"
+            if [[ -n "$MSG" ]]; then
+              echo ""
+              echo "$MSG"
+            fi
+          } > "$NOTES_FILE"
+
+          if [[ "$TEST_OUTCOME" == "failure" ]]; then
+            echo "" >> "$NOTES_FILE"
+            echo "⚠️ unit test ফেল করেছে; তাই এটি pre-release, অ্যাপে আপডেট হিসেবে দেখাবে না।" >> "$NOTES_FILE"
+            LATEST_FLAG="--prerelease"
+          else
+            LATEST_FLAG="--latest"
+          fi
+
+          gh release create "$TAG" "${{ steps.apk.outputs.apk_path }}" \
+            --target "$GITHUB_SHA" \
+            --title "Araaf Tractor Khata v${{ steps.apk.outputs.version_name }} (build ${VERSION_CODE})" \
+            --notes-file "$NOTES_FILE" \
+            "$LATEST_FLAG"
+
+          if [[ "$TEST_OUTCOME" == "failure" ]]; then
+            echo "### ⚠️ Release \`$TAG\` pre-release হিসেবে প্রকাশিত (unit test ফেল) — অ্যাপের আপডেটে আসবে না।" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### 📦 Release \`$TAG\` প্রকাশিত হয়েছে — অ্যাপের ভেতর থেকে আপডেট করা যাবে।" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Upload build reports on failure
         if: failure()
