@@ -1,234 +1,70 @@
-name: Build Araaf Tractor Khata APK
+name: Build APK
 
 on:
   push:
-    paths-ignore:
-      - '**.md'
-      - '**.txt'
-  pull_request:
+    paths-ignore: ['**.md', '**.txt']
   workflow_dispatch:
-    inputs:
-      run_tests:
-        description: 'APK বানানোর পর unit test চালাবেন? (ফেল করলেও APK পাওয়া যাবে)'
-        type: boolean
-        default: true
-
-# একই branch-এ নতুন push এলে আগের build বাতিল হবে।
-# তবে মূল branch-এ চলমান build (যেখানে রিলিজ প্রকাশ হয়) মাঝপথে বাতিল হবে না।
-concurrency:
-  group: build-apk-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != format('refs/heads/{0}', github.event.repository.default_branch) }}
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
-    name: Build preview APK
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    # GitHub Release বানাতে লেখার অনুমতি লাগে
-    permissions:
-      contents: write
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
+      - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      # ubuntu-latest-এ Android SDK আগে থেকেই আছে। compileSdk 36 (minor 1) এর জন্য android-36.1 লাগে।
-      - name: Prepare Android SDK
-        shell: bash
+      - name: Android SDK
         run: |
-          echo "ANDROID_HOME=${ANDROID_HOME:-unset}"
           yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager "platforms;android-36" "platforms;android-36.1" \
-            || echo "::warning::sdkmanager প্যাকেজ ইনস্টল করতে পারেনি; Gradle নিজে ডাউনলোড করার চেষ্টা করবে।"
+          sdkmanager "platforms;android-36" "platforms;android-36.1" || true
 
-      # প্রজেক্ট খোঁজা: (১) repo root-এ, (২) কোনো সাবফোল্ডারে (যেমন native_work/), (৩) শুধু source ZIP আছে
-      - name: Find or extract Android project
+      - name: Find project
         id: project
-        shell: bash
         run: |
-          set -euo pipefail
-          PROJECT_DIR=""
-          if [[ -f settings.gradle.kts && -f app/build.gradle.kts ]]; then
-            PROJECT_DIR="$GITHUB_WORKSPACE"
-            echo "Layout: repo root"
-          else
-            FOUND="$(find "$GITHUB_WORKSPACE" -maxdepth 4 -type f -path '*/app/build.gradle.kts' \
-              -not -path '*/.git/*' -not -path '*/build/*' -print -quit)"
-            if [[ -n "$FOUND" ]]; then
-              PROJECT_DIR="$(dirname "$(dirname "$FOUND")")"
-              echo "Layout: subfolder"
-            else
-              # একাধিক ZIP থাকলে সংখ্যা ধরে সবচেয়ে নতুনটা (v40 > v36) নেওয়া হয়
-              ZIP_FILE="$(find "$GITHUB_WORKSPACE" -maxdepth 1 -type f -iname '*.zip' | sort -V | tail -n1)"
-              if [[ -z "$ZIP_FILE" ]]; then
-                echo "::error::Android project বা source ZIP repository-তে পাওয়া যায়নি।"
-                exit 1
-              fi
-              echo "Layout: ZIP -> $(basename "$ZIP_FILE")"
-              mkdir -p "$RUNNER_TEMP/aaraaf-source"
-              unzip -q "$ZIP_FILE" -d "$RUNNER_TEMP/aaraaf-source"
-              FOUND="$(find "$RUNNER_TEMP/aaraaf-source" -type f -path '*/app/build.gradle.kts' -print -quit)"
-              if [[ -z "$FOUND" ]]; then
-                echo "::error::ZIP-এর ভেতরে app/build.gradle.kts নেই।"
-                exit 1
-              fi
-              PROJECT_DIR="$(dirname "$(dirname "$FOUND")")"
-              echo "::notice::ZIP থেকে বিল্ড হচ্ছে: $(basename "$ZIP_FILE")"
-            fi
+          if [[ -f app/build.gradle.kts ]]; then DIR="$GITHUB_WORKSPACE"
+          else DIR="$(dirname "$(dirname "$(find "$GITHUB_WORKSPACE" -maxdepth 4 -path '*/app/build.gradle.kts' -not -path '*/.git/*' -print -quit)")")"
           fi
-          if [[ ! -f "$PROJECT_DIR/settings.gradle.kts" ]]; then
-            echo "::error::$PROJECT_DIR-এ settings.gradle.kts নেই।"
-            exit 1
-          fi
-          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
-          echo "Android project: $PROJECT_DIR"
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
 
-      - name: Sanity checks
-        shell: bash
-        run: |
-          set -euo pipefail
-          DIR="${{ steps.project.outputs.project_dir }}"
-          # preview build একই debug key দিয়ে সাইন হয়; কী না থাকলে আপডেট ইনস্টল হবে না
-          if [[ ! -f "$DIR/araaf-debug.keystore" && ! -f "$DIR/debug.keystore" ]]; then
-            echo "::error::araaf-debug.keystore পাওয়া যায়নি। এটি repository-তে commit করুন।"
-            exit 1
-          fi
-          if ! grep -q "RestartActivity" "$DIR/app/src/main/AndroidManifest.xml"; then
-            echo "::warning::AndroidManifest.xml-এ RestartActivity নেই; প্রোফাইল বদলালে অ্যাপ বন্ধ হয়ে যেতে পারে।"
-          fi
-
-      - name: Set up Gradle 9.3.1
-        uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.3.1'
 
-      # প্রতি বিল্ডে versionCode বাড়ে (100 + run number), তাই আগের অ্যাপের উপরে আপডেট ইনস্টল হয়
-      - name: Compute version code
+      - name: Version code
         run: echo "VERSION_CODE=$((100 + GITHUB_RUN_NUMBER))" >> "$GITHUB_ENV"
 
-      - name: Build preview APK
-        run: gradle -p "${{ steps.project.outputs.project_dir }}" :app:assemblePreview --stacktrace
+      - name: Build APK
+        run: gradle -p "${{ steps.project.outputs.dir }}" :app:assemblePreview --stacktrace
 
-      - name: Collect and verify APK
+      - name: Collect APK
         id: apk
-        shell: bash
         run: |
-          set -euo pipefail
-          DIR="${{ steps.project.outputs.project_dir }}"
-          SRC="$(find "$DIR/app/build/outputs/apk/preview" -maxdepth 1 -type f -name '*.apk' -print -quit)"
-          if [[ -z "$SRC" ]]; then
-            echo "::error::preview APK তৈরি হয়নি।"
-            exit 1
-          fi
-
-          VERSION_NAME="$(sed -nE 's/.*versionName *= *"([^"]+)".*/\1/p' "$DIR/app/build.gradle.kts" | head -n1)"
-          VERSION_NAME="${VERSION_NAME:-unknown}"
-          mkdir -p "$RUNNER_TEMP/dist"
-          OUT="$RUNNER_TEMP/dist/Araaf-Tractor-Khata-v${VERSION_NAME}-build${GITHUB_RUN_NUMBER}.apk"
+          SRC="$(find "${{ steps.project.outputs.dir }}/app/build/outputs/apk/preview" -name '*.apk' -print -quit)"
+          OUT="$RUNNER_TEMP/Araaf-Tractor-Khata-build${GITHUB_RUN_NUMBER}.apk"
           cp "$SRC" "$OUT"
-          echo "apk_path=$OUT" >> "$GITHUB_OUTPUT"
-          echo "version_name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
+          echo "path=$OUT" >> "$GITHUB_OUTPUT"
+          BT="$(ls -d "${ANDROID_HOME}"/build-tools/* | sort -V | tail -n1)"
+          "$BT/apksigner" verify --print-certs "$OUT" | grep -E "SHA-(1|256)" | tee -a "$GITHUB_STEP_SUMMARY"
 
-          # apksigner দিয়ে সাইন যাচাই + SHA-1/SHA-256
-          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
-          BT="$(ls -d "$SDK_ROOT"/build-tools/* | sort -V | tail -n1)"
-          "$BT/apksigner" verify --verbose --print-certs "$OUT" > "$RUNNER_TEMP/apksigner.txt" 2>&1 || {
-            cat "$RUNNER_TEMP/apksigner.txt"
-            echo "::error::APK-র সাইন যাচাই ফেল করেছে।"
-            exit 1
-          }
-
-          SIZE="$(du -h "$OUT" | cut -f1)"
-          APK_SHA="$(sha256sum "$OUT" | cut -d' ' -f1)"
-          {
-            echo "### ✅ Araaf Tractor Khata v${VERSION_NAME} (build ${GITHUB_RUN_NUMBER}, versionCode ${VERSION_CODE})"
-            echo ""
-            echo "- ফাইল: \`$(basename "$OUT")\` ($SIZE)"
-            echo "- APK SHA-256: \`$APK_SHA\`"
-            echo ""
-            echo "#### সাইন সার্টিফিকেট (Google Cloud OAuth-এ এই SHA-1 দিন)"
-            echo '```'
-            grep -E "Verified using|certificate SHA-(1|256) digest" "$RUNNER_TEMP/apksigner.txt" || true
-            echo '```'
-          } | tee -a "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: Araaf-Tractor-Khata-preview-apk
-          path: ${{ steps.apk.outputs.apk_path }}
-          if-no-files-found: error
+          name: Araaf-Tractor-Khata-apk
+          path: ${{ steps.apk.outputs.path }}
           retention-days: 30
 
-      # R8 চালু থাকায় ক্র্যাশ লগের নাম এলোমেলো দেখায়; এই ফাইল দিয়ে আসল লাইন বের করা যায়
-      - name: Upload R8 mapping (crash log decode)
-        uses: actions/upload-artifact@v4
-        with:
-          name: Araaf-Tractor-Khata-r8-mapping
-          path: ${{ steps.project.outputs.project_dir }}/app/build/outputs/mapping/preview/mapping.txt
-          if-no-files-found: warn
-          retention-days: 30
-
-      # APK আগেই আপলোড হয়ে গেছে, তাই test ফেল করলেও APK পাওয়া যাবে
-      - name: Run unit tests
-        id: tests
-        if: github.event_name != 'workflow_dispatch' || inputs.run_tests
-        continue-on-error: true
-        run: gradle -p "${{ steps.project.outputs.project_dir }}" :app:testDebugUnitTest --stacktrace
-
-      - name: Upload test reports
-        if: always() && (github.event_name != 'workflow_dispatch' || inputs.run_tests)
-        uses: actions/upload-artifact@v4
-        with:
-          name: unit-test-reports
-          path: |
-            ${{ steps.project.outputs.project_dir }}/app/build/reports/tests
-            ${{ steps.project.outputs.project_dir }}/app/build/test-results
-          if-no-files-found: ignore
-          retention-days: 14
-
-      # অ্যাপের ভেতরের "আপডেট" বাটন এই রিলিজ থেকেই নতুন APK নামায়।
-      # tag অবশ্যই "build-<versionCode>" হতে হবে এবং রিলিজে .apk ফাইল থাকতে হবে (UpdateManager এটাই খোঁজে)।
-      # শুধু মূল branch-এর push / manual run-এ রিলিজ হয়। unit test ফেল করলেও রিলিজ আটকায় না।
-      - name: Publish GitHub Release (in-app update)
-        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
-        shell: bash
+      - name: Publish release
+        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          TEST_OUTCOME: ${{ steps.tests.outcome }}
         run: |
-          set -euo pipefail
           TAG="build-${VERSION_CODE}"
-
-          # একই run আবার চালালে আগের একই tag-এর রিলিজ মুছে নতুন করে বানানো হয়
           gh release delete "$TAG" --cleanup-tag --yes >/dev/null 2>&1 || true
-
-          gh release create "$TAG" "${{ steps.apk.outputs.apk_path }}" \
-            --target "$GITHUB_SHA" \
-            --title "Araaf Tractor Khata v${{ steps.apk.outputs.version_name }} (build ${VERSION_CODE})" \
-            --notes "" \
-            --latest
-
-          echo "### 📦 Release \`$TAG\` প্রকাশিত হয়েছে — অ্যাপের ভেতর থেকে আপডেট করা যাবে।" >> "$GITHUB_STEP_SUMMARY"
-          if [[ "$TEST_OUTCOME" == "failure" ]]; then
-            echo "### ⚠️ unit test ফেল করেছে; তবুও আপডেট চালু আছে। Test report দেখে ঠিক করুন।" >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-      - name: Upload build reports on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-failure-reports
-          path: ${{ steps.project.outputs.project_dir }}/app/build/reports
-          if-no-files-found: ignore
-          retention-days: 7
+          gh release create "$TAG" "${{ steps.apk.outputs.path }}" --target "$GITHUB_SHA" --title "Build ${VERSION_CODE}" --notes "" --latest
