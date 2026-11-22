@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
 
+env:
+  # In-app update ei public repo-র Releases থেকে APK নেয়
+  PUBLIC_REPO: shakib7464/Araaf-tractor-khata
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -50,8 +54,17 @@ jobs:
         with:
           gradle-version: '9.3.1'
 
-      - name: Version code
-        run: echo "VERSION_CODE=$((100 + GITHUB_RUN_NUMBER))" >> "$GITHUB_ENV"
+      - name: Version code and update repo
+        env:
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          echo "VERSION_CODE=$((10000 + GITHUB_RUN_NUMBER))" >> "$GITHUB_ENV"
+          if [[ -n "$RELEASE_TOKEN" ]]; then
+            echo "UPDATE_REPO=$PUBLIC_REPO" >> "$GITHUB_ENV"
+          else
+            echo "::warning::RELEASE_TOKEN secret not set; release will be published in this (private) repo and in-app update will not work."
+            echo "UPDATE_REPO=$GITHUB_REPOSITORY" >> "$GITHUB_ENV"
+          fi
 
       - name: Build APK
         run: gradle -p "${{ steps.project.outputs.dir }}" :app:assemblePreview --stacktrace
@@ -60,7 +73,7 @@ jobs:
         id: apk
         run: |
           SRC="$(find "${{ steps.project.outputs.dir }}/app/build/outputs/apk/preview" -name '*.apk' -print -quit)"
-          OUT="$RUNNER_TEMP/Araaf-Tractor-Khata-build${GITHUB_RUN_NUMBER}.apk"
+          OUT="$RUNNER_TEMP/Araaf-Tractor-Khata-build${VERSION_CODE}.apk"
           cp "$SRC" "$OUT"
           echo "path=$OUT" >> "$GITHUB_OUTPUT"
           BT="$(ls -d "${ANDROID_HOME}"/build-tools/* | sort -V | tail -n1)"
@@ -75,9 +88,15 @@ jobs:
       - name: Publish release
         if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
         env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          OWN_TOKEN: ${{ github.token }}
         run: |
           TAG="build-${VERSION_CODE}"
-          gh release delete "$TAG" --cleanup-tag --yes >/dev/null 2>&1 || true
-          gh release create "$TAG" "${{ steps.apk.outputs.path }}" --target "$GITHUB_SHA" --title "Build ${VERSION_CODE}" --notes "" --latest
+          if [[ -n "$RELEASE_TOKEN" ]]; then
+            export GH_TOKEN="$RELEASE_TOKEN"; REPO="$PUBLIC_REPO"; TARGET=()
+          else
+            export GH_TOKEN="$OWN_TOKEN"; REPO="$GITHUB_REPOSITORY"; TARGET=(--target "$GITHUB_SHA")
+          fi
+          gh release delete "$TAG" --repo "$REPO" --cleanup-tag --yes >/dev/null 2>&1 || true
+          gh release create "$TAG" "${{ steps.apk.outputs.path }}" --repo "$REPO" "${TARGET[@]}" --title "Build ${VERSION_CODE}" --notes "" --latest
+          echo "Published $TAG to $REPO" >> "$GITHUB_STEP_SUMMARY"
