@@ -62,16 +62,16 @@ jobs:
       - name: Accept Android licenses
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
 
-      - name: Build Debug APK
+      - name: Build Preview APK (release-speed, debug key)
         run: |
           cd "$PROJECT_DIR"
-          gradle assembleDebug --no-daemon --stacktrace
+          gradle assemblePreview --no-daemon --stacktrace
 
       - name: Prepare APK
         run: |
-          APK=$(find "$PROJECT_DIR" -path '*outputs/apk/debug/*.apk' | head -n 1)
+          APK=$(find "$PROJECT_DIR" -path '*outputs/apk/preview/*.apk' | head -n 1)
           if [ -z "$APK" ]; then
-            echo "::error::Debug APK তৈরি হয়নি"
+            echo "::error::Preview APK তৈরি হয়নি"
             exit 1
           fi
           VNAME=$(grep -oP 'versionName = "\K[^"]+' "$PROJECT_DIR/app/build.gradle.kts" | head -n 1)
