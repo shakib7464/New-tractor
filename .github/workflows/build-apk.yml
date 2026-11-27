@@ -75,9 +75,23 @@ jobs:
             exit 1
           fi
           VNAME=$(grep -oP 'versionName = "\K[^"]+' "$PROJECT_DIR/app/build.gradle.kts" | head -n 1)
+          APK_NAME="Araaf-Tractor-Khata-v${VNAME}-build${VERSION_CODE}.apk"
           mkdir -p dist
-          cp "$APK" "dist/Araaf-Tractor-Khata-v${VNAME}-build${VERSION_CODE}.apk"
+          cp "$APK" "dist/$APK_NAME"
           echo "VNAME=$VNAME" >> "$GITHUB_ENV"
+
+          # latest.json: অ্যাপ api.github.com-এর বদলে এই ছোট ফাইল পড়ে আপডেট খোঁজে (rate limit লাগে না)
+          SIZE=$(stat -c %s "dist/$APK_NAME")
+          cat > dist/latest.json <<JSON
+          {
+            "versionCode": ${VERSION_CODE},
+            "versionName": "${VNAME}",
+            "downloadUrl": "https://github.com/${GITHUB_REPOSITORY}/releases/download/build-${VERSION_CODE}/${APK_NAME}",
+            "sizeBytes": ${SIZE},
+            "notes": ""
+          }
+          JSON
+          cat dist/latest.json
 
       - name: Print APK signing SHA-1 (Google Login এর জন্য)
         run: |
@@ -102,7 +116,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "build-${VERSION_CODE}" dist/*.apk \
+          gh release create "build-${VERSION_CODE}" dist/*.apk dist/latest.json \
             --target "$GITHUB_SHA" \
             --title "Araaf Tractor Khata v${VNAME} (build ${VERSION_CODE})" \
             --notes "Automatic build from ${GITHUB_SHA::7}"
