@@ -18,7 +18,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      VERSION_CODE: ${{ 100 + github.run_number }}
       # In-app updater এর জন্য public রিপোজিটরি দিতে চাইলে Settings > Variables এ UPDATE_REPO (owner/repo) বসান
       UPDATE_REPO: ${{ vars.UPDATE_REPO }}
     steps:
@@ -27,6 +26,7 @@ jobs:
 
       - name: Latest ZIP unzip
         run: |
+          echo "VERSION_CODE=$((100 + GITHUB_RUN_NUMBER))" >> "$GITHUB_ENV"
           ZIP=$(ls Aaraaf-Tractor-Khata-updated-v*.zip | sort -V | tail -n 1)
           echo "Using: $ZIP"
           mkdir -p build_src
@@ -49,8 +49,9 @@ jobs:
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
 
       - name: Build Debug APK
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: gradle assembleDebug --no-daemon --stacktrace
+        run: |
+          cd "$PROJECT_DIR"
+          gradle assembleDebug --no-daemon --stacktrace
 
       - name: Prepare APK
         run: |
