@@ -26,7 +26,7 @@ jobs:
 
       - name: Latest ZIP unzip
         run: |
-          echo "VERSION_CODE=$((100 + GITHUB_RUN_NUMBER))" >> "$GITHUB_ENV"
+          echo "VERSION_CODE=$(( $(date +%s) / 60 ))" >> "$GITHUB_ENV"
           ZIP=$(ls Aaraaf-Tractor-Khata-updated-v*.zip | sort -V | tail -n 1)
           echo "Using: $ZIP"
           mkdir -p build_src
