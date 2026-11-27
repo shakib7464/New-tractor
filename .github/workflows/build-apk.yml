@@ -4,7 +4,8 @@ name: Build APK
 on:
   push:
     paths:
-      - '**.zip'
+      - '*.zip'
+      - '**/*.zip'
       - '.github/workflows/build-apk.yml'
   workflow_dispatch:
 
@@ -24,9 +25,11 @@ jobs:
       UPDATE_REPO: ${{ vars.UPDATE_REPO }}
 
     steps:
+      # 1. Checkout Repository
       - name: Checkout
         uses: actions/checkout@v4
 
+      # 2. Find and Extract Latest ZIP
       - name: Find and Extract Latest ZIP
         shell: bash
         run: |
@@ -34,20 +37,31 @@ jobs:
 
           echo "VERSION_CODE=$(( $(date +%s) / 60 ))" >> "$GITHUB_ENV"
 
-          ZIP=$(find . -type f \
-            -iname '*tractor*khata*.zip' \
-            -not -path './.git/*' \
-            -not -path './build_src/*' |
-            sort -V | tail -n 1)
+          echo "Searching for Tractor Khata ZIP..."
 
-          if [ -z "$ZIP" ]; then
+          mapfile -t ZIPS < <(
+            find . -type f \
+              -iname 'Aaraaf-Tractor-Khata-updated-v*.zip' \
+              -not -path './.git/*' \
+              -not -path './build_src/*' |
+              sort -V
+          )
+
+          if [ "${#ZIPS[@]}" -eq 0 ]; then
             echo "::error::Tractor Khata ZIP not found!"
-            echo "Repository files:"
             find . -maxdepth 4 -type f
             exit 1
           fi
 
+          ZIP="${ZIPS[-1]}"
+
           echo "Selected ZIP: $ZIP"
+
+          echo "ZIP SHA256:"
+          sha256sum "$ZIP"
+
+          echo "ZIP CONTENT CHECK:"
+          unzip -t "$ZIP"
 
           mkdir -p build_src
           unzip -q "$ZIP" -d build_src
@@ -58,35 +72,69 @@ jobs:
             head -n 1)
 
           if [ -z "$SETTINGS" ]; then
-            echo "::error::settings.gradle.kts not found inside ZIP"
+            echo "::error::settings.gradle.kts not found!"
             exit 1
           fi
 
           PROJECT=$(dirname "$SETTINGS")
 
           echo "PROJECT_DIR=$PROJECT" >> "$GITHUB_ENV"
+
           echo "Project directory: $PROJECT"
 
+          GRADLE_FILE="$PROJECT/app/build.gradle.kts"
+
+          if [ ! -f "$GRADLE_FILE" ]; then
+            echo "::error::app/build.gradle.kts not found!"
+            exit 1
+          fi
+
+          echo "Checking DashboardScreen.kt..."
+
+          mapfile -t DASHBOARDS < <(
+            find "$PROJECT/app/src/main" \
+              -name DashboardScreen.kt
+          )
+
+          if [ "${#DASHBOARDS[@]}" -eq 0 ]; then
+            echo "::error::DashboardScreen.kt not found!"
+            exit 1
+          fi
+
+          for FILE in "${DASHBOARDS[@]}"; do
+            echo "Dashboard: $FILE"
+            sha256sum "$FILE"
+            head -n 25 "$FILE"
+          done
+
+      # 3. Setup JDK 17
       - name: Setup JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
 
+      # 4. Setup Gradle
       - name: Setup Gradle 9.3.1
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 9.3.1
 
+      # 5. Accept Android Licenses
       - name: Accept Android Licenses
         run: |
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
 
+      # 6. Build Preview APK
       - name: Build Preview APK
         run: |
           cd "$PROJECT_DIR"
-          gradle assemblePreview --no-daemon --stacktrace
 
+          gradle assemblePreview \
+            --no-daemon \
+            --stacktrace
+
+      # 7. Prepare APK
       - name: Prepare APK
         shell: bash
         run: |
@@ -97,27 +145,24 @@ jobs:
             head -n 1)
 
           if [ -z "$APK" ]; then
-            echo "::error::Preview APK not created"
+            echo "::error::Preview APK not created!"
             exit 1
           fi
 
           GRADLE_FILE="$PROJECT_DIR/app/build.gradle.kts"
 
-          if [ ! -f "$GRADLE_FILE" ]; then
-            echo "::error::app/build.gradle.kts not found"
-            exit 1
-          fi
-
-          VNAME=$(grep -oP 'versionName\s*=\s*"\K[^"]+' "$GRADLE_FILE" | head -n 1)
+          VNAME=$(grep -oP 'versionName\s*=\s*"\K[^"]+' \
+            "$GRADLE_FILE" | head -n 1 || true)
 
           if [ -z "$VNAME" ]; then
-            echo "::error::versionName not found"
+            echo "::error::versionName not found!"
             exit 1
           fi
 
           APK_NAME="Araaf-Tractor-Khata-v${VNAME}-build${VERSION_CODE}.apk"
 
           mkdir -p dist
+
           cp "$APK" "dist/$APK_NAME"
 
           echo "VNAME=$VNAME" >> "$GITHUB_ENV"
@@ -134,15 +179,21 @@ jobs:
           }
           JSON
 
+          echo "APK prepared successfully!"
           cat dist/latest.json
 
+      # 8. Print APK Signing SHA-1
       - name: Print APK Signing SHA-1
+        shell: bash
         run: |
+          set -euo pipefail
+
           APKSIGNER=$(find "$ANDROID_HOME/build-tools" \
-            -name apksigner -type f | sort -V | tail -n 1)
+            -name apksigner -type f |
+            sort -V | tail -n 1)
 
           if [ -z "$APKSIGNER" ]; then
-            echo "::error::apksigner not found"
+            echo "::error::apksigner not found!"
             exit 1
           fi
 
@@ -152,18 +203,23 @@ jobs:
             echo "Version: v${VNAME} (build ${VERSION_CODE})"
             echo
             echo '```'
+
             "$APKSIGNER" verify --print-certs dist/*.apk |
               grep -E 'SHA-(1|256) digest' || true
+
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # 9. Upload APK Artifact
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: Araaf-Tractor-Khata-APK
           path: dist/*.apk
           if-no-files-found: error
+          retention-days: 30
 
+      # 10. Create GitHub Release
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
